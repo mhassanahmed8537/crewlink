@@ -1,0 +1,99 @@
+x-backend-env: &backend_env
+  DJANGO_SECRET_KEY: dev-only-insecure-key-change-me
+  DJANGO_DEBUG: "true"
+  DJANGO_ALLOWED_HOSTS: "*"
+  POSTGRES_DB: callout
+  POSTGRES_USER: callout
+  POSTGRES_PASSWORD: callout
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/0
+  CORS_ALLOW_ALL_ORIGINS: "true"
+  STATUS_CACHE_TTL_SECONDS: "4"
+  RECIPIENT_BATCH_SIZE: "1000"
+  AI_PROVIDER: anthropic
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_PROVIDER_TIMEOUT_SECONDS: "8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: callout
+      POSTGRES_USER: callout
+      POSTGRES_PASSWORD: callout
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: ./backend
+    image: local27-backend:latest
+    command: sh -c "python manage.py migrate --noinput && python manage.py seed_demo_data"
+    environment: *backend_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web1:
+    image: local27-backend:latest
+    environment: *backend_env
+    ports:
+      - "8001:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web2:
+    image: local27-backend:latest
+    environment: *backend_env
+    ports:
+      - "8002:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: local27-backend:latest
+    command: celery -A config worker -l info
+    environment: *backend_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - web1
+      - web2
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - nginx
+
+volumes:
+  postgres_data:
