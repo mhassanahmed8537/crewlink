@@ -1,79 +1,39 @@
 # Member Callout
 
-Design and requirements are in [DESIGN.md](DESIGN.md). This is Part B, a running slice of that design: a Django REST API, a Next.js leadership screen, Postgres, Redis, and a Celery worker, with two backend instances behind nginx for the devops bonus.
+Design and requirements: [DESIGN.md](DESIGN.md).
 
-## Run it
+Run it: `docker compose up -d --build` (Docker + Compose). Builds, migrates, seeds two locals, starts two
+backend instances behind nginx, a Celery worker, and the frontend. Screen: http://localhost:3000.
+API via the load balancer: http://localhost:8080/api/v1 (instances directly at :8001 and :8002).
 
-Requires Docker and Docker Compose.
+Logins: `leader@local27.example` / `leadership123`, `member@local27.example` / `member123` (Local 27),
+`leader@local84.example` / `leadership123`, `member@local84.example` / `member123` (Local 84).
 
+Member read/acknowledge:
 ```bash
-docker compose up -d --build
+curl -X POST http://localhost:8080/api/v1/announcements/<id>/read/ -H "Authorization: Token <member token>"
+curl -X POST http://localhost:8080/api/v1/announcements/<id>/acknowledge/ -H "Authorization: Token <member token>"
 ```
 
-This builds the backend and frontend images, waits for Postgres and Redis to be healthy, runs migrations, seeds two locals with their logins and one already sent announcement, then starts two backend instances behind nginx, a Celery worker, and the frontend.
-
-- Leadership screen: http://localhost:3000
-- API through the load balancer: http://localhost:8080/api/v1
-- API, instance 1 directly: http://localhost:8001/api/v1
-- API, instance 2 directly: http://localhost:8002/api/v1
-
-Re-seed at any point with `docker compose run --rm web1 python manage.py seed_demo_data`. It is safe to run more than once, it looks up existing rows by email and by request id instead of duplicating them.
-
-## Logins
-
-| Local | Role | Email | Password |
-|---|---|---|---|
-| Local 27 | Leadership | leader@local27.example | leadership123 |
-| Local 27 | Member | member@local27.example | member123 |
-| Local 84 | Leadership | leader@local84.example | leadership123 |
-| Local 84 | Member | member@local84.example | member123 |
-
+Rule 1, a Local 27 login cannot read Local 84's data:
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/auth/login/ \
-  -H "Content-Type: application/json" \
-  -d '{"email": "leader@local27.example", "password": "leadership123"}'
+curl -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/v1/announcements/<Local 27 id>/ \
+  -H "Authorization: Token <Local 84 leader token>"   # 404
 ```
 
-## Member read and acknowledge
-
+Rule 2, a retried send does not double deliver. Automated: `docker compose run --rm web1 pytest -q core/tests/test_rule2_idempotency.py`.
+By hand, same `Idempotency-Key` twice through the load balancer:
 ```bash
-TOKEN=<token from the member@local27.example login>
-ANNOUNCEMENT=d33cd1f4-f31e-5419-9c8d-805238dacf85
-
-curl -s -X POST http://localhost:8080/api/v1/announcements/$ANNOUNCEMENT/read/ \
-  -H "Authorization: Token $TOKEN"
-curl -s -X POST http://localhost:8080/api/v1/announcements/$ANNOUNCEMENT/acknowledge/ \
-  -H "Authorization: Token $TOKEN"
+curl -X POST http://localhost:8080/api/v1/announcements/ -H "Authorization: Token <token>" \
+  -H "Idempotency-Key: k1" -H "Content-Type: application/json" -d '{"title":"x","body":"y"}'
+# repeat: same id comes back, 200 not 201, recipient count does not double
 ```
 
-## Rule 1, a Local 27 login cannot read Local 84's data
-
-```bash
-TOKEN27=<token from the leader@local27.example login>
-curl -s -o /dev/null -w "%{http_code}\n" \
-  http://localhost:8080/api/v1/announcements/d33cd1f4-f31e-5419-9c8d-805238dacf85/ \
-  -H "Authorization: Token <token from the leader@local84.example login>"
-# 404: the base viewset scopes every query to the caller's own local before this handler runs
-```
-
-## Rule 2, a retried send does not double deliver
-
-Automated: `docker compose run --rm web1 pytest -q core/tests/test_rule2_idempotency.py`, covers both a retried request and a restarted worker directly.
-
-By hand, sending the same `Idempotency-Key` twice against the load balancer, so either instance can take either request:
-
-```bash
-TOKEN=<token from a leadership login>
-curl -s -X POST http://localhost:8080/api/v1/announcements/ \
-  -H "Authorization: Token $TOKEN" -H "Idempotency-Key: retry-demo-1" -H "Content-Type: application/json" \
-  -d '{"title": "Retry check", "body": "Same key, twice."}'
-# run the exact same curl again: the same id comes back, 200 instead of 201 the second time,
-# and the recipient row count for that id never doubles
-```
+Re-seed anytime: `docker compose run --rm web1 python manage.py seed_demo_data` (safe to re-run).
 
 ## TEST ACCOUNTS
 
-The two ids below are not from one particular run. `seed_demo_data` derives them with `uuid5` from a fixed namespace, so they come out the same on any fresh `docker compose up`, not just this one.
+Ids below are deterministic (`uuid5` off a fixed namespace in `seed_demo_data`), so they are the same on any fresh `docker compose up`.
 
 ```json
 {
@@ -100,12 +60,3 @@ The two ids below are not from one particular run. `seed_demo_data` derives them
   ]
 }
 ```
-
-## What's in here
-
-- `DESIGN.md`, requirements and design, Part 0 and Part A.
-- `backend/`, Django, DRF, Postgres, Celery, Redis.
-- `frontend/`, the one Next.js leadership screen.
-- `nginx/`, the load balancer config for the devops bonus.
-- `docker-compose.yml`, the whole stack.
-- AI conversation exports, at the repo root, one file per design session.
